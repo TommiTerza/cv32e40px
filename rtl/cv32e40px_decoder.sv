@@ -61,6 +61,8 @@ module cv32e40px_decoder
   output logic        wfi_o       ,            // pipeline flush is requested
 
   output logic        fencei_insn_o,           // fence.i instruction
+  output logic        simt_valid_o,
+  output simt_opcode_e simt_op_o,
 
   output logic        rega_used_o,             // rs1 is used by current instruction
   output logic        regb_used_o,             // rs2 is used by current instruction
@@ -170,6 +172,8 @@ module cv32e40px_decoder
   logic [1:0] ctrl_transfer_insn;
 
   csr_opcode_e csr_op;
+  simt_opcode_e simt_op;
+  logic        simt_valid;
 
   logic       alu_en;
   logic       mult_int_en;
@@ -198,6 +202,8 @@ module cv32e40px_decoder
   always_comb
   begin: instruction_decoder
     ctrl_transfer_insn             = BRANCH_NONE;
+    simt_op                        = SIMT_OP_NONE;
+    simt_valid                     = 1'b0;
     ctrl_transfer_target_mux_sel_o = JT_JAL;
 
     alu_en                         = 1'b1;
@@ -1574,7 +1580,15 @@ module cv32e40px_decoder
       end
 
       OPCODE_CUSTOM_0: begin
-        if (COREV_PULP && instr_rdata_i[14:13] != 2'b11) begin // cv.l[bhw][u] and cv.elw
+        if ((instr_rdata_i[31:25] == SIMT_FUNCT7_WSPAWN) && (instr_rdata_i[14:12] == 3'b000)) begin
+          simt_valid  = 1'b1;
+          simt_op     = SIMT_OP_WSPAWN;
+          rega_used_o = 1'b1;
+          regb_used_o = 1'b1;
+        end else if ((instr_rdata_i[31:25] == SIMT_FUNCT7_EXIT) && (instr_rdata_i[14:12] == 3'b000)) begin
+          simt_valid = 1'b1;
+          simt_op    = SIMT_OP_EXIT;
+        end else if (COREV_PULP && instr_rdata_i[14:13] != 2'b11) begin // cv.l[bhw][u] and cv.elw
           data_req           = 1'b1;
           regfile_mem_we     = 1'b1;
           rega_used_o        = 1'b1;
@@ -3004,6 +3018,8 @@ module cv32e40px_decoder
   assign hwlp_we_o                   = (deassert_we_i) ? 3'b0          : hwlp_we;
   assign csr_op_o                    = (deassert_we_i) ? CSR_OP_READ   : csr_op;
   assign ctrl_transfer_insn_in_id_o  = (deassert_we_i) ? BRANCH_NONE   : ctrl_transfer_insn;
+  assign simt_valid_o                = (deassert_we_i) ? 1'b0          : simt_valid;
+  assign simt_op_o                   = simt_op;
 
   assign ctrl_transfer_insn_in_dec_o  = ctrl_transfer_insn;
   assign regfile_alu_we_dec_o         = regfile_alu_we;

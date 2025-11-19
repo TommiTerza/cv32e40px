@@ -26,6 +26,8 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 module cv32e40px_if_stage #(
+    parameter int unsigned NUM_WARPS = 1,
+    parameter int unsigned WID_WIDTH = (NUM_WARPS <= 1) ? 1 : $clog2(NUM_WARPS),
     parameter COREV_X_IF = 0,
     parameter COREV_PULP = 0, // PULP ISA Extension (including PULP specific CSRs and hardware loop, excluding cv.elw)
     parameter PULP_OBI = 0,  // Legacy PULP OBI behavior
@@ -90,6 +92,15 @@ module cv32e40px_if_stage #(
     input  logic [4:0] u_exc_vec_pc_mux_i,  // selects ISR address for vectorized interrupt lines
     output logic       csr_mtvec_init_o,  // tell CS regfile to init mtvec
 
+    // Warp scheduler interface (defaults keep single-warp behaviour)
+    // Warp selection inputs/outputs (default to single-warp behaviour).
+    input  logic [NUM_WARPS-1:0] warp_active_i = {NUM_WARPS{1'b1}},
+    input  logic [NUM_WARPS-1:0] warp_stall_i  = '0,
+    input  logic [31:0]          warp_pc_i,
+    output logic [31:0]          branch_addr_o,
+    output logic [WID_WIDTH-1:0] warp_id_if_o,
+    output logic [WID_WIDTH-1:0] warp_id_id_o,
+
     // jump and branch target and decision
     input logic [31:0] jump_target_id_i,  // jump target address
     input logic [31:0] jump_target_ex_i,  // jump target address
@@ -136,6 +147,26 @@ module cv32e40px_if_stage #(
   logic [31:0] instr_decompressed_dec;
   logic        instr_compressed_int;
 
+  logic        warp_sched_valid;
+  logic [WID_WIDTH-1:0] warp_sched_id;
+  logic [WID_WIDTH-1:0] warp_id_id_q;
+
+  // Simple round-robin scheduler chooses which warp feeds IF each cycle.
+  cv32e40px_warp_scheduler #(
+      .NUM_WARPS (NUM_WARPS),
+      .WID_WIDTH (WID_WIDTH)
+  ) warp_scheduler_i (
+      .clk            (clk),
+      .rst_n          (rst_n),
+      .sched_enable_i (req_i),
+      .warp_active_i  (warp_active_i),
+      .warp_stall_i   (warp_stall_i),
+      .warp_valid_o   (warp_sched_valid),
+      .warp_id_o      (warp_sched_id)
+  );
+
+  assign warp_id_if_o = warp_sched_valid ? warp_sched_id : '0;
+
   // exception PC selection mux
   always_comb begin : EXC_PC_MUX
     unique case (trap_addr_mux_i)
@@ -162,8 +193,8 @@ module cv32e40px_if_stage #(
 
   // fetch address selection
   always_comb begin
-    // Default assign PC_BOOT (should be overwritten in below case)
-    branch_addr_n = {boot_addr_i[31:2], 2'b0};
+    // Default to the caller-provided warp PC (per-warp tracking)
+    branch_addr_n = {warp_pc_i[31:2], 2'b0};
 
     unique case (pc_mux_i)
       PC_BOOT: branch_addr_n = {boot_addr_i[31:2], 2'b0};
@@ -178,6 +209,8 @@ module cv32e40px_if_stage #(
       default: ;
     endcase
   end
+
+  assign branch_addr_o = branch_addr_n;
 
   // tell CS register file to initialize mtvec on boot
   assign csr_mtvec_init_o = (pc_mux_i == PC_BOOT) & pc_set_i;
@@ -244,6 +277,7 @@ module cv32e40px_if_stage #(
       pc_id_o             <= '0;
       is_compressed_id_o  <= 1'b0;
       illegal_c_insn_id_o <= 1'b0;
+      warp_id_id_q        <= '0;
     end else begin
 
       if (if_valid && instr_valid) begin
@@ -253,12 +287,15 @@ module cv32e40px_if_stage #(
         illegal_c_insn_id_o <= illegal_c_insn;
         is_fetch_failed_o   <= 1'b0;
         pc_id_o             <= pc_if_o;
+        warp_id_id_q        <= warp_id_if_o;
       end else if (clear_instr_valid_i) begin
         instr_valid_id_o  <= 1'b0;
         is_fetch_failed_o <= fetch_failed;
       end
     end
   end
+
+  assign warp_id_id_o = warp_id_id_q;
 
   assign if_ready = fetch_valid & id_ready_i;
   assign if_valid = (~halt_if_i) & if_ready;

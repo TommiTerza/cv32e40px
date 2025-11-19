@@ -33,7 +33,9 @@ module cv32e40px_register_file #(
     parameter FPU        = 0,
     parameter ZFINX      = 0,
     parameter COREV_X_IF = 0,
-    parameter X_DUALREAD = 0
+    parameter X_DUALREAD = 0,
+    parameter int unsigned NUM_WARPS = 1,
+    parameter int unsigned WID_WIDTH = (NUM_WARPS <= 1) ? 1 : $clog2(NUM_WARPS)
 ) (
     // Clock and Reset
     input logic clk,
@@ -45,23 +47,28 @@ module cv32e40px_register_file #(
 
     //Read port R1
     input logic [ADDR_WIDTH-1:0] raddr_a_i,
+    input logic [WID_WIDTH-1:0]  raddr_a_wid_i,
     output logic [X_DUALREAD:0][DATA_WIDTH-1:0] rdata_a_o,
 
     //Read port R2
     input logic [ADDR_WIDTH-1:0] raddr_b_i,
+    input logic [WID_WIDTH-1:0]  raddr_b_wid_i,
     output logic [X_DUALREAD:0][DATA_WIDTH-1:0] rdata_b_o,
 
     //Read port R3
     input logic [ADDR_WIDTH-1:0] raddr_c_i,
+    input logic [WID_WIDTH-1:0]  raddr_c_wid_i,
     output logic [X_DUALREAD:0][DATA_WIDTH-1:0] rdata_c_o,
 
     // Write port W1
     input logic [ADDR_WIDTH-1:0] waddr_a_i,
+    input logic [WID_WIDTH-1:0]  waddr_a_wid_i,
     input logic [DATA_WIDTH-1:0] wdata_a_i,
     input logic                  we_a_i,
 
     // Write port W2
     input logic [ADDR_WIDTH-1:0] waddr_b_i,
+    input logic [WID_WIDTH-1:0]  waddr_b_wid_i,
     input logic [DATA_WIDTH-1:0] wdata_b_i,
     input logic                  we_b_i
 );
@@ -70,22 +77,38 @@ module cv32e40px_register_file #(
   localparam NUM_WORDS = 2 ** (ADDR_WIDTH - 1);
   // number of floating point registers
   localparam NUM_FP_WORDS = 2 ** (ADDR_WIDTH - 1);
-  localparam NUM_TOT_WORDS = FPU ? (ZFINX ? NUM_WORDS : NUM_WORDS + NUM_FP_WORDS) : NUM_WORDS;
 
-  // integer register file
-  logic [    NUM_WORDS-1:0][DATA_WIDTH-1:0] mem;
+  typedef logic [DATA_WIDTH-1:0] reg_data_t;
 
-  // fp register file
-  logic [ NUM_FP_WORDS-1:0][DATA_WIDTH-1:0] mem_fp;
+  reg_data_t mem   [NUM_WARPS-1:0][NUM_WORDS-1:0];
+  reg_data_t mem_fp[NUM_WARPS-1:0][NUM_FP_WORDS-1:0];
 
-  // masked write addresses
-  logic [   ADDR_WIDTH-1:0]                 waddr_a;
-  logic [   ADDR_WIDTH-1:0]                 waddr_b;
+  function automatic reg_data_t read_data (
+      input logic [WID_WIDTH-1:0] wid,
+      input logic [ADDR_WIDTH-1:0] addr
+  );
+    reg_data_t ret;
+    begin
+      if ((FPU == 1) && (ZFINX == 0) && addr[5]) begin
+        ret = mem_fp[wid][addr[4:0]];
+      end else begin
+        ret = mem[wid][addr[4:0]];
+      end
+      return ret;
+    end
+  endfunction
 
-  // write enable signals for all registers
-  logic [NUM_TOT_WORDS-1:0]                 we_a_dec;
-  logic [NUM_TOT_WORDS-1:0]                 we_b_dec;
-
+  function automatic logic [ADDR_WIDTH-1:0] dualread_addr (
+      input logic [ADDR_WIDTH-1:0] addr
+  );
+    logic [ADDR_WIDTH-1:0] dual_addr;
+    begin
+      dual_addr = addr;
+      dual_addr[4:1] = addr[4:1];
+      dual_addr[0]   = addr[0] | 1'b1;
+      return dual_addr;
+    end
+  endfunction
 
   //-----------------------------------------------------------------------------
   //-- READ : Read address decoder RAD
@@ -94,102 +117,107 @@ module cv32e40px_register_file #(
     if (COREV_X_IF != 0) begin : gen_corev_x_if
       if (X_DUALREAD) begin : gen_corev_x_if_dualread
         always_comb begin
-          rdata_a_o[0] = raddr_a_i[5] ? mem_fp[raddr_a_i[4:0]] : mem[raddr_a_i[4:0]];
-          rdata_b_o[0] = raddr_b_i[5] ? mem_fp[raddr_b_i[4:0]] : mem[raddr_b_i[4:0]];
-          rdata_c_o[0] = raddr_c_i[5] ? mem_fp[raddr_c_i[4:0]] : mem[raddr_c_i[4:0]];
-          if (dualread_i[0] == 1)
-            rdata_a_o[1] = raddr_a_i[5] ? (mem_fp[{
-              raddr_a_i[4:1], raddr_a_i[0]|1'b1
-            }]) : (mem[{
-              raddr_a_i[4:1], raddr_a_i[0]|1'b1
-            }]);
-          else rdata_a_o[1] = '0;
-          if (dualread_i[1] == 1)
-            rdata_b_o[1] = raddr_b_i[5] ? (mem_fp[{
-              raddr_b_i[4:1], raddr_b_i[0]|1'b1
-            }]) : (mem[{
-              raddr_b_i[4:1], raddr_b_i[0]|1'b1
-            }]);
-          else rdata_b_o[1] = '0;
-          if (dualread_i[2] == 1)
-            rdata_c_o[1] = raddr_c_i[5] ? (mem_fp[{
-              raddr_c_i[4:1], raddr_c_i[0]|1'b1
-            }]) : (mem[{
-              raddr_c_i[4:1], raddr_c_i[0]|1'b1
-            }]);
-          else rdata_c_o[1] = '0;
+          rdata_a_o[0] = read_data(raddr_a_wid_i, raddr_a_i);
+          rdata_b_o[0] = read_data(raddr_b_wid_i, raddr_b_i);
+          rdata_c_o[0] = read_data(raddr_c_wid_i, raddr_c_i);
+          if (dualread_i[0]) begin
+            rdata_a_o[1] = read_data(raddr_a_wid_i, dualread_addr(raddr_a_i));
+          end else begin
+            rdata_a_o[1] = '0;
+          end
+          if (dualread_i[1]) begin
+            rdata_b_o[1] = read_data(raddr_b_wid_i, dualread_addr(raddr_b_i));
+          end else begin
+            rdata_b_o[1] = '0;
+          end
+          if (dualread_i[2]) begin
+            rdata_c_o[1] = read_data(raddr_c_wid_i, dualread_addr(raddr_c_i));
+          end else begin
+            rdata_c_o[1] = '0;
+          end
         end
       end else begin : gen_corev_x_if_no_dualread
-        assign rdata_a_o = raddr_a_i[5] ? mem_fp[raddr_a_i[4:0]] : mem[raddr_a_i[4:0]];
-        assign rdata_b_o = raddr_b_i[5] ? mem_fp[raddr_b_i[4:0]] : mem[raddr_b_i[4:0]];
-        assign rdata_c_o = raddr_c_i[5] ? mem_fp[raddr_c_i[4:0]] : mem[raddr_c_i[4:0]];
+        assign rdata_a_o[0] = read_data(raddr_a_wid_i, raddr_a_i);
+        assign rdata_b_o[0] = read_data(raddr_b_wid_i, raddr_b_i);
+        assign rdata_c_o[0] = read_data(raddr_c_wid_i, raddr_c_i);
       end
     end else begin : gen_no_corev_x_if
-      assign rdata_a_o = raddr_a_i[5] ? mem_fp[raddr_a_i[4:0]] : mem[raddr_a_i[4:0]];
-      assign rdata_b_o = raddr_b_i[5] ? mem_fp[raddr_b_i[4:0]] : mem[raddr_b_i[4:0]];
-      assign rdata_c_o = raddr_c_i[5] ? mem_fp[raddr_c_i[4:0]] : mem[raddr_c_i[4:0]];
-    end
-  endgenerate
-  //-----------------------------------------------------------------------------
-  //-- WRITE : Write Address Decoder (WAD), combinatorial process
-  //-----------------------------------------------------------------------------
-
-  // Mask top bit of write address to disable fp regfile
-  assign waddr_a = waddr_a_i;
-  assign waddr_b = waddr_b_i;
-
-  genvar gidx;
-  generate
-    for (gidx = 0; gidx < NUM_TOT_WORDS; gidx++) begin : gen_we_decoder
-      assign we_a_dec[gidx] = (waddr_a == gidx) ? we_a_i : 1'b0;
-      assign we_b_dec[gidx] = (waddr_b == gidx) ? we_b_i : 1'b0;
-    end
-  endgenerate
-
-  genvar i, l;
-  generate
-
-    //-----------------------------------------------------------------------------
-    //-- WRITE : Write operation
-    //-----------------------------------------------------------------------------
-    // R0 is nil
-    always_ff @(posedge clk or negedge rst_n) begin
-      if (~rst_n) begin
-        // R0 is nil
-        mem[0] <= 32'b0;
-      end else begin
-        // R0 is nil
-        mem[0] <= 32'b0;
+      if (X_DUALREAD) begin : gen_no_corev_x_if_dualread
+        always_comb begin
+          rdata_a_o[0] = read_data(raddr_a_wid_i, raddr_a_i);
+          rdata_b_o[0] = read_data(raddr_b_wid_i, raddr_b_i);
+          rdata_c_o[0] = read_data(raddr_c_wid_i, raddr_c_i);
+          rdata_a_o[1] = read_data(raddr_a_wid_i, dualread_addr(raddr_a_i));
+          rdata_b_o[1] = read_data(raddr_b_wid_i, dualread_addr(raddr_b_i));
+          rdata_c_o[1] = read_data(raddr_c_wid_i, dualread_addr(raddr_c_i));
+        end
+      end else begin : gen_no_corev_x_if_no_dualread
+        assign rdata_a_o[0] = read_data(raddr_a_wid_i, raddr_a_i);
+        assign rdata_b_o[0] = read_data(raddr_b_wid_i, raddr_b_i);
+        assign rdata_c_o[0] = read_data(raddr_c_wid_i, raddr_c_i);
       end
     end
+  endgenerate
 
-    // loop from 1 to NUM_WORDS-1 as R0 is nil
-    for (i = 1; i < NUM_WORDS; i++) begin : gen_rf
-
-      always_ff @(posedge clk, negedge rst_n) begin : register_write_behavioral
-        if (rst_n == 1'b0) begin
-          mem[i] <= 32'b0;
+  //-----------------------------------------------------------------------------
+  //-- WRITE : Write operation
+  //-----------------------------------------------------------------------------
+  genvar warp_idx, reg_idx;
+  generate
+    for (warp_idx = 0; warp_idx < NUM_WARPS; warp_idx++) begin : gen_warps
+      // R0 per warp is always zero
+      always_ff @(posedge clk or negedge rst_n) begin
+        if (~rst_n) begin
+          mem[warp_idx][0] <= '0;
         end else begin
-          if (we_b_dec[i] == 1'b1) mem[i] <= wdata_b_i;
-          else if (we_a_dec[i] == 1'b1) mem[i] <= wdata_a_i;
+          mem[warp_idx][0] <= '0;
         end
       end
 
+      for (reg_idx = 1; reg_idx < NUM_WORDS; reg_idx++) begin : gen_rf
+        always_ff @(posedge clk or negedge rst_n) begin
+          if (~rst_n) begin
+            mem[warp_idx][reg_idx] <= '0;
+          end else begin
+            if (we_b_i && (waddr_b_wid_i == WID_WIDTH'(warp_idx)) && (waddr_b_i[5] == 1'b0) &&
+                (waddr_b_i[4:0] == 5'(reg_idx))) begin
+              mem[warp_idx][reg_idx] <= wdata_b_i;
+            end else if (we_a_i && (waddr_a_wid_i == WID_WIDTH'(warp_idx)) && (waddr_a_i[5] == 1'b0) &&
+                         (waddr_a_i[4:0] == 5'(reg_idx))) begin
+              mem[warp_idx][reg_idx] <= wdata_a_i;
+            end
+          end
+        end
+      end
     end
 
     if (FPU == 1 && ZFINX == 0) begin : gen_mem_fp_write
-      // Floating point registers
-      for (l = 0; l < NUM_FP_WORDS; l++) begin
-        always_ff @(posedge clk, negedge rst_n) begin : fp_regs
-          if (rst_n == 1'b0) mem_fp[l] <= '0;
-          else if (we_b_dec[l+NUM_WORDS] == 1'b1) mem_fp[l] <= wdata_b_i;
-          else if (we_a_dec[l+NUM_WORDS] == 1'b1) mem_fp[l] <= wdata_a_i;
+      genvar fp_warp, fp_idx;
+      for (fp_warp = 0; fp_warp < NUM_WARPS; fp_warp++) begin : gen_fp_warp
+        for (fp_idx = 0; fp_idx < NUM_FP_WORDS; fp_idx++) begin : fp_regs
+          always_ff @(posedge clk or negedge rst_n) begin
+            if (~rst_n) begin
+              mem_fp[fp_warp][fp_idx] <= '0;
+            end else begin
+              if (we_b_i && (waddr_b_wid_i == WID_WIDTH'(fp_warp)) && (waddr_b_i[5] == 1'b1) &&
+                  (waddr_b_i[4:0] == 5'(fp_idx))) begin
+                mem_fp[fp_warp][fp_idx] <= wdata_b_i;
+              end else if (we_a_i && (waddr_a_wid_i == WID_WIDTH'(fp_warp)) && (waddr_a_i[5] == 1'b1) &&
+                           (waddr_a_i[4:0] == 5'(fp_idx))) begin
+                mem_fp[fp_warp][fp_idx] <= wdata_a_i;
+              end
+            end
+          end
         end
       end
     end else begin : gen_no_mem_fp_write
-      assign mem_fp = 'b0;
+      genvar fp_warp_zero, fp_idx_zero;
+      for (fp_warp_zero = 0; fp_warp_zero < NUM_WARPS; fp_warp_zero++) begin : gen_fp_zero
+        for (fp_idx_zero = 0; fp_idx_zero < NUM_FP_WORDS; fp_idx_zero++) begin : gen_fp_zero_idx
+          assign mem_fp[fp_warp_zero][fp_idx_zero] = '0;
+        end
+      end
     end
-
   endgenerate
 
 endmodule

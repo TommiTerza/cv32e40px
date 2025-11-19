@@ -39,7 +39,8 @@ module cv32e40px_ex_stage
     parameter APU_NARGS_CPU    = 3,
     parameter APU_WOP_CPU      = 6,
     parameter APU_NDSFLAGS_CPU = 15,
-    parameter APU_NUSFLAGS_CPU = 5
+    parameter APU_NUSFLAGS_CPU = 5,
+    parameter int unsigned NUM_WARPS = 1
 ) (
     input logic clk,
     input logic rst_n,
@@ -152,14 +153,23 @@ module cv32e40px_ex_stage
     input logic        csr_access_i,
     input logic [31:0] csr_rdata_i,
 
+    // SIMT control inputs
+    input logic        simt_valid_i,
+    input simt_opcode_e simt_op_i,
+    input logic [31:0] simt_rs1_i,
+    input logic [31:0] simt_rs2_i,
+    input logic [WID_WIDTH-1:0] wid_i,
+
     // Output of EX stage pipeline
     output logic [ 5:0] regfile_waddr_wb_o,
+    output logic [WID_WIDTH-1:0] regfile_waddr_wb_wid_o,
     output logic        regfile_we_wb_o,
     output logic        regfile_we_wb_power_o,
     output logic [31:0] regfile_wdata_wb_o,
 
     // Forwarding ports : to ID stage
     output logic [ 5:0] regfile_alu_waddr_fw_o,
+    output logic [WID_WIDTH-1:0] regfile_alu_waddr_fw_wid_o,
     output logic        regfile_alu_we_fw_o,
     output logic        regfile_alu_we_fw_power_o,
     output logic [31:0] regfile_alu_wdata_fw_o,  // forward to RF and ID/EX pipe, ALU & MUL
@@ -167,6 +177,13 @@ module cv32e40px_ex_stage
     // To IF: Jump and branch target and decision
     output logic [31:0] jump_target_o,
     output logic        branch_decision_o,
+
+    // SIMT command outputs
+    output logic        simt_cmd_valid_o,
+    output simt_opcode_e simt_cmd_op_o,
+    output logic [WID_WIDTH-1:0] simt_cmd_wid_o,
+    output logic [NUM_WARPS-1:0] simt_cmd_mask_o,
+    output logic [31:0] simt_cmd_pc_o,
 
     // Stall Control
     input logic is_decoding_i, // Used to mask data Dependency inside the APU dispatcher in case of an istruction non valid
@@ -177,6 +194,8 @@ module cv32e40px_ex_stage
     output logic ex_valid_o,  // EX stage gets new data
     input  logic wb_ready_i  // WB stage ready for new data
 );
+
+  localparam int unsigned WID_WIDTH = (NUM_WARPS <= 1) ? 1 : $clog2(NUM_WARPS);
 
   logic [                31:0] alu_result;
   logic [                31:0] mult_result;
@@ -206,12 +225,18 @@ module cv32e40px_ex_stage
   logic                        apu_rvalid_q;
   logic [                31:0] apu_result_q;
   logic [APU_NUSFLAGS_CPU-1:0] apu_flags_q;
+  logic [WID_WIDTH-1:0]        apu_wid_q;
+  logic [WID_WIDTH-1:0]        apu_result_wid;
+  logic [NUM_WARPS-1:0]        simt_mask_trunc;
+  assign simt_mask_trunc = simt_rs1_i[NUM_WARPS-1:0];
+  logic [WID_WIDTH-1:0]        regfile_wid_lsu;
 
   // ALU write port mux
   always_comb begin
     regfile_alu_wdata_fw_o    = '0;
     regfile_alu_waddr_fw_o    = '0;
     regfile_alu_we_fw_o       = '0;
+    regfile_alu_waddr_fw_wid_o = '0;
     wb_contention             = 1'b0;
     result_fw_to_x_o          = '0;
     regfile_alu_we_fw_power_o = 1'b0;
@@ -220,6 +245,7 @@ module cv32e40px_ex_stage
       regfile_alu_we_fw_power_o = 1'b1;
       regfile_alu_waddr_fw_o    = {1'b0, x_result_rd_i};
       regfile_alu_wdata_fw_o    = x_result_data_i;
+      regfile_alu_waddr_fw_wid_o = wid_i;
       if (regfile_alu_we_i) begin
         wb_contention = 1'b1;
       end
@@ -230,6 +256,7 @@ module cv32e40px_ex_stage
         regfile_alu_we_fw_power_o = 1'b1;
         regfile_alu_waddr_fw_o    = apu_waddr;
         regfile_alu_wdata_fw_o    = apu_result;
+        regfile_alu_waddr_fw_wid_o = apu_result_wid;
         result_fw_to_x_o          = apu_result;
         if (regfile_alu_we_i & ~apu_en_i) begin
           wb_contention = 1'b1;
@@ -240,6 +267,7 @@ module cv32e40px_ex_stage
                                                 regfile_alu_we_i & ~apu_en_i &
                                                 mult_ready & alu_ready & lsu_ready_ex_i;
         regfile_alu_waddr_fw_o = regfile_alu_waddr_i;
+        regfile_alu_waddr_fw_wid_o = wid_i;
         if (alu_en_i) begin
           regfile_alu_wdata_fw_o = alu_result;
           result_fw_to_x_o       = alu_result;
@@ -261,6 +289,7 @@ module cv32e40px_ex_stage
     regfile_we_wb_o       = 1'b0;
     regfile_we_wb_power_o = 1'b0;
     regfile_waddr_wb_o    = regfile_waddr_lsu;
+    regfile_waddr_wb_wid_o = regfile_wid_lsu;
     regfile_wdata_wb_o    = lsu_rdata_i;
     wb_contention_lsu     = 1'b0;
 
@@ -276,6 +305,7 @@ module cv32e40px_ex_stage
       regfile_we_wb_power_o = 1'b1;
       regfile_waddr_wb_o    = apu_waddr;
       regfile_wdata_wb_o    = apu_result;
+      regfile_waddr_wb_wid_o = apu_result_wid;
     end
   end
 
@@ -285,6 +315,11 @@ module cv32e40px_ex_stage
   // branch handling
   assign branch_decision_o    = alu_cmp_result;
   assign jump_target_o        = alu_operand_c_i;
+  assign simt_cmd_valid_o     = simt_valid_i;
+  assign simt_cmd_op_o        = simt_op_i;
+  assign simt_cmd_wid_o       = wid_i;
+  assign simt_cmd_mask_o      = simt_mask_trunc;
+  assign simt_cmd_pc_o        = simt_rs2_i;
 
 
   ////////////////////////////
@@ -419,6 +454,7 @@ module cv32e40px_ex_stage
           apu_rvalid_q <= 1'b0;
           apu_result_q <= 'b0;
           apu_flags_q  <= 'b0;
+          apu_wid_q    <= '0;
         end else begin
           if (apu_rvalid_i && apu_multicycle &&
               (data_misaligned_i || data_misaligned_ex_i ||
@@ -429,6 +465,7 @@ module cv32e40px_ex_stage
             apu_rvalid_q <= 1'b1;
             apu_result_q <= apu_result_i;
             apu_flags_q  <= apu_flags_i;
+            apu_wid_q    <= wid_i;
           end else if (apu_rvalid_q && !(data_misaligned_i || data_misaligned_ex_i ||
                                          ((data_req_i || data_rvalid_i) && regfile_alu_we_i) ||
                                          (mulh_active && (mult_operator_i == MUL_H)) ||
@@ -450,6 +487,7 @@ module cv32e40px_ex_stage
       assign apu_operands_o = apu_operands_i;
       assign apu_op_o = apu_op_i;
       assign apu_result = apu_rvalid_q ? apu_result_q : apu_result_i;
+      assign apu_result_wid = apu_rvalid_q ? apu_wid_q : wid_i;
       assign fpu_fflags_we_o = apu_valid;
       assign fpu_fflags_o = apu_rvalid_q ? apu_flags_q : apu_flags_i;
     end else begin : gen_no_apu
@@ -462,6 +500,7 @@ module cv32e40px_ex_stage
       assign apu_req                 = 1'b0;
       assign apu_gnt                 = 1'b0;
       assign apu_result              = 32'b0;
+      assign apu_result_wid          = '0;
       assign apu_valid               = 1'b0;
       assign apu_waddr               = 6'b0;
       assign apu_stall               = 1'b0;
@@ -491,6 +530,7 @@ module cv32e40px_ex_stage
       regfile_we_lsu    <= 1'b0;
       x_mem_instr_wb_o   <= 1'b0;
       x_mem_result_id_o  <= '0;
+      regfile_wid_lsu    <= '0;
     end else begin
       if (ex_valid_o) // wb_ready_i is implied
       begin
@@ -499,6 +539,7 @@ module cv32e40px_ex_stage
         x_mem_result_id_o <= x_mem_id_ex_i;
         if (regfile_we_i & ~lsu_err_i) begin
           regfile_waddr_lsu <= regfile_waddr_i;
+          regfile_wid_lsu   <= wid_i;
         end
       end else if (wb_ready_i) begin
         // we are ready for a new instruction, but there is none available,

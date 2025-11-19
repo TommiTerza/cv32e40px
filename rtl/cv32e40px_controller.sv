@@ -32,7 +32,8 @@ module cv32e40px_controller import cv32e40px_pkg::*;
 #(
   parameter COREV_CLUSTER = 0,
   parameter COREV_PULP    = 0,
-  parameter FPU           = 0
+  parameter FPU           = 0,
+  parameter int unsigned NUM_WARPS = 1
 )
 (
   input  logic        clk,                        // Gated clock
@@ -67,6 +68,7 @@ module cv32e40px_controller import cv32e40px_pkg::*;
 
   // from IF/ID pipeline
   input  logic        instr_valid_i,              // instruction coming from IF/ID pipeline is valid
+  input  logic [WID_WIDTH-1:0] wid_id_i,
 
   // from prefetcher
   output logic        instr_req_o,                // Start fetching instructions
@@ -87,6 +89,7 @@ module cv32e40px_controller import cv32e40px_pkg::*;
 
   // to hwloop_regs
   output logic [1:0]        hwlp_dec_cnt_o,
+  output logic [WID_WIDTH-1:0] hwlp_dec_wid_o,
 
   output logic              hwlp_jump_o,
   output logic [31:0]       hwlp_targ_addr_o,
@@ -207,6 +210,8 @@ module cv32e40px_controller import cv32e40px_pkg::*;
   output logic        perf_pipeline_stall_o       // stall due to cv.elw extra cycles
 );
 
+  localparam int unsigned WID_WIDTH = (NUM_WARPS <= 1) ? 1 : $clog2(NUM_WARPS);
+
   // FSM state encoding
   ctrl_state_e ctrl_fsm_cs, ctrl_fsm_ns;
 
@@ -324,6 +329,7 @@ module cv32e40px_controller import cv32e40px_pkg::*;
     hwlp_mask_o             = 1'b0;
 
     hwlp_dec_cnt_o          = '0;
+    hwlp_dec_wid_o          = wid_id_i;
     hwlp_end_4_id_d         = 1'b0;
 
     // When the controller tells to hwlp-jump, the prefetcher does not always jump immediately,

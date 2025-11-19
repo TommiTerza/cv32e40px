@@ -9,10 +9,9 @@
 // specific language governing permissions and limitations under the License.
 
 ////////////////////////////////////////////////////////////////////////////////
-// Engineer:       Antonio Pullini - pullinia@iis.ee.ethz.ch                  //
+// Engineer:       Francesco Conti - f.conti@unibo.it                         //
 //                                                                            //
 // Additional contributions by:                                               //
-//                 Sven Stucki - svstucki@student.ethz.ch                     //
 //                 Michael Gautschi - gautschi@iis.ee.ethz.ch                 //
 //                 Davide Schiavone - pschiavo@iis.ee.ethz.ch                 //
 //                                                                            //
@@ -21,8 +20,7 @@
 // Language:       SystemVerilog                                              //
 //                                                                            //
 // Description:    Register file with 31x 32 bit wide registers. Register 0   //
-//                 is fixed to 0. This register file is based on latches and  //
-//                 is thus smaller than the flip-flop based register file.    //
+//                 is fixed to 0. This register file is based on flip-flops.  //
 //                 Also supports the fp-register file now if FPU=1            //
 //                 If ZFINX is 1, floating point operations take values       //
 //                 from the X register file                                   //
@@ -35,7 +33,9 @@ module cv32e40px_register_file #(
     parameter FPU        = 0,
     parameter ZFINX      = 0,
     parameter COREV_X_IF = 0,
-    parameter X_DUALREAD = 0
+    parameter X_DUALREAD = 0,
+    parameter int unsigned NUM_WARPS = 1,
+    parameter int unsigned WID_WIDTH = (NUM_WARPS <= 1) ? 1 : $clog2(NUM_WARPS)
 ) (
     // Clock and Reset
     input logic clk,
@@ -43,27 +43,32 @@ module cv32e40px_register_file #(
 
     input logic scan_cg_en_i,
 
-    input logic dualread_i,
+    input logic [2:0] dualread_i,
 
     //Read port R1
     input logic [ADDR_WIDTH-1:0] raddr_a_i,
+    input logic [WID_WIDTH-1:0]  raddr_a_wid_i,
     output logic [X_DUALREAD:0][DATA_WIDTH-1:0] rdata_a_o,
 
     //Read port R2
     input logic [ADDR_WIDTH-1:0] raddr_b_i,
+    input logic [WID_WIDTH-1:0]  raddr_b_wid_i,
     output logic [X_DUALREAD:0][DATA_WIDTH-1:0] rdata_b_o,
 
     //Read port R3
     input logic [ADDR_WIDTH-1:0] raddr_c_i,
+    input logic [WID_WIDTH-1:0]  raddr_c_wid_i,
     output logic [X_DUALREAD:0][DATA_WIDTH-1:0] rdata_c_o,
 
     // Write port W1
     input logic [ADDR_WIDTH-1:0] waddr_a_i,
+    input logic [WID_WIDTH-1:0]  waddr_a_wid_i,
     input logic [DATA_WIDTH-1:0] wdata_a_i,
     input logic                  we_a_i,
 
     // Write port W2
     input logic [ADDR_WIDTH-1:0] waddr_b_i,
+    input logic [WID_WIDTH-1:0]  waddr_b_wid_i,
     input logic [DATA_WIDTH-1:0] wdata_b_i,
     input logic                  we_b_i
 );
@@ -72,152 +77,147 @@ module cv32e40px_register_file #(
   localparam NUM_WORDS = 2 ** (ADDR_WIDTH - 1);
   // number of floating point registers
   localparam NUM_FP_WORDS = 2 ** (ADDR_WIDTH - 1);
-  localparam NUM_TOT_WORDS = FPU ? (ZFINX ? NUM_WORDS : NUM_WORDS + NUM_FP_WORDS) : NUM_WORDS;
 
-  // integer register file
-  logic [   DATA_WIDTH-1:0] mem            [NUM_WORDS];
-  logic [NUM_TOT_WORDS-1:1] waddr_onehot_a;
-  logic [NUM_TOT_WORDS-1:1] waddr_onehot_b, waddr_onehot_b_q;
-  logic        [NUM_TOT_WORDS-1:1] mem_clocks;
-  logic        [   DATA_WIDTH-1:0] wdata_a_q;
-  logic        [   DATA_WIDTH-1:0] wdata_b_q;
+  typedef logic [DATA_WIDTH-1:0] reg_data_t;
 
-  // masked write addresses
-  logic        [   ADDR_WIDTH-1:0] waddr_a;
-  logic        [   ADDR_WIDTH-1:0] waddr_b;
+  reg_data_t mem   [NUM_WARPS-1:0][NUM_WORDS-1:0];
+  reg_data_t mem_fp[NUM_WARPS-1:0][NUM_FP_WORDS-1:0];
 
-  logic                            clk_int;
+  function automatic reg_data_t read_data (
+      input logic [WID_WIDTH-1:0] wid,
+      input logic [ADDR_WIDTH-1:0] addr
+  );
+    reg_data_t ret;
+    begin
+      if ((FPU == 1) && (ZFINX == 0) && addr[5]) begin
+        ret = mem_fp[wid][addr[4:0]];
+      end else begin
+        ret = mem[wid][addr[4:0]];
+      end
+      return ret;
+    end
+  endfunction
 
-  // fp register file
-  logic        [   DATA_WIDTH-1:0] mem_fp     [NUM_FP_WORDS];
-
-  int unsigned                     i;
-  int unsigned                     j;
-  int unsigned                     k;
-  int unsigned                     l;
-
-  genvar x;
-  genvar y;
+  function automatic logic [ADDR_WIDTH-1:0] dualread_addr (
+      input logic [ADDR_WIDTH-1:0] addr
+  );
+    logic [ADDR_WIDTH-1:0] dual_addr;
+    begin
+      dual_addr = addr;
+      dual_addr[4:1] = addr[4:1];
+      dual_addr[0]   = addr[0] | 1'b1;
+      return dual_addr;
+    end
+  endfunction
 
   //-----------------------------------------------------------------------------
   //-- READ : Read address decoder RAD
   //-----------------------------------------------------------------------------
   generate
-    if (COREV_X_IF != 0) begin
-      if (X_DUALREAD) begin
+    if (COREV_X_IF != 0) begin : gen_corev_x_if
+      if (X_DUALREAD) begin : gen_corev_x_if_dualread
         always_comb begin
-          if (dualread_i) begin
-            rdata_a_o[0] = raddr_a_i[5] ? mem_fp[raddr_a_i[4:0]] : mem[raddr_a_i[4:0]];
-            rdata_b_o[0] = raddr_b_i[5] ? mem_fp[raddr_b_i[4:0]] : mem[raddr_b_i[4:0]];
-            rdata_c_o[0] = raddr_c_i[5] ? mem_fp[raddr_c_i[4:0]] : mem[raddr_c_i[4:0]];
-            rdata_a_o[1] = raddr_a_i[5] ? mem_fp[raddr_a_i[4:0] | 5'b00001] : mem[raddr_a_i[4:0] | 5'b00001];
-            rdata_b_o[1] = raddr_b_i[5] ? mem_fp[raddr_b_i[4:0] | 5'b00001] : mem[raddr_b_i[4:0] | 5'b00001];
-            rdata_c_o[1] = raddr_c_i[5] ? mem_fp[raddr_c_i[4:0] | 5'b00001] : mem[raddr_c_i[4:0] | 5'b00001];
+          rdata_a_o[0] = read_data(raddr_a_wid_i, raddr_a_i);
+          rdata_b_o[0] = read_data(raddr_b_wid_i, raddr_b_i);
+          rdata_c_o[0] = read_data(raddr_c_wid_i, raddr_c_i);
+          if (dualread_i[0]) begin
+            rdata_a_o[1] = read_data(raddr_a_wid_i, dualread_addr(raddr_a_i));
           end else begin
-            rdata_a_o[0] = raddr_a_i[5] ? mem_fp[raddr_a_i[4:0]] : mem[raddr_a_i[4:0]];
-            rdata_b_o[0] = raddr_b_i[5] ? mem_fp[raddr_b_i[4:0]] : mem[raddr_b_i[4:0]];
-            rdata_c_o[0] = raddr_c_i[5] ? mem_fp[raddr_c_i[4:0]] : mem[raddr_c_i[4:0]];
-            rdata_b_o[1] = '0;
             rdata_a_o[1] = '0;
+          end
+          if (dualread_i[1]) begin
+            rdata_b_o[1] = read_data(raddr_b_wid_i, dualread_addr(raddr_b_i));
+          end else begin
+            rdata_b_o[1] = '0;
+          end
+          if (dualread_i[2]) begin
+            rdata_c_o[1] = read_data(raddr_c_wid_i, dualread_addr(raddr_c_i));
+          end else begin
             rdata_c_o[1] = '0;
           end
         end
-      end else begin
-        assign rdata_a_o = raddr_a_i[5] ? mem_fp[raddr_a_i[4:0]] : mem[raddr_a_i[4:0]];
-        assign rdata_b_o = raddr_b_i[5] ? mem_fp[raddr_b_i[4:0]] : mem[raddr_b_i[4:0]];
-        assign rdata_c_o = raddr_c_i[5] ? mem_fp[raddr_c_i[4:0]] : mem[raddr_c_i[4:0]];
+      end else begin : gen_corev_x_if_no_dualread
+        assign rdata_a_o[0] = read_data(raddr_a_wid_i, raddr_a_i);
+        assign rdata_b_o[0] = read_data(raddr_b_wid_i, raddr_b_i);
+        assign rdata_c_o[0] = read_data(raddr_c_wid_i, raddr_c_i);
       end
-    end else begin
-      assign rdata_a_o = raddr_a_i[5] ? mem_fp[raddr_a_i[4:0]] : mem[raddr_a_i[4:0]];
-      assign rdata_b_o = raddr_b_i[5] ? mem_fp[raddr_b_i[4:0]] : mem[raddr_b_i[4:0]];
-      assign rdata_c_o = raddr_c_i[5] ? mem_fp[raddr_c_i[4:0]] : mem[raddr_c_i[4:0]];
-    end
-  endgenerate
-  //-----------------------------------------------------------------------------
-  // WRITE : SAMPLE INPUT DATA
-  //---------------------------------------------------------------------------
-
-  cv32e40px_clock_gate CG_WE_GLOBAL (
-      .clk_i       (clk),
-      .en_i        (we_a_i | we_b_i),
-      .scan_cg_en_i(scan_cg_en_i),
-      .clk_o       (clk_int)
-  );
-
-  // use clk_int here, since otherwise we don't want to write anything anyway
-  always_ff @(posedge clk_int, negedge rst_n) begin : sample_waddr
-    if (~rst_n) begin
-      wdata_a_q        <= '0;
-      wdata_b_q        <= '0;
-      waddr_onehot_b_q <= '0;
-    end else begin
-      if (we_a_i) wdata_a_q <= wdata_a_i;
-
-      if (we_b_i) wdata_b_q <= wdata_b_i;
-
-      waddr_onehot_b_q <= waddr_onehot_b;
-    end
-  end
-
-  //-----------------------------------------------------------------------------
-  //-- WRITE : Write Address Decoder (WAD), combinatorial process
-  //-----------------------------------------------------------------------------
-
-  assign waddr_a = waddr_a_i;
-  assign waddr_b = waddr_b_i;
-
-  genvar gidx;
-  generate
-    for (gidx = 1; gidx < NUM_TOT_WORDS; gidx++) begin : gen_we_decoder
-      assign waddr_onehot_a[gidx] = (we_a_i == 1'b1) && (waddr_a == gidx);
-      assign waddr_onehot_b[gidx] = (we_b_i == 1'b1) && (waddr_b == gidx);
-    end
-  endgenerate
-
-  //-----------------------------------------------------------------------------
-  //-- WRITE : Clock gating (if integrated clock-gating cells are available)
-  //-----------------------------------------------------------------------------
-  generate
-    for (x = 1; x < NUM_TOT_WORDS; x++) begin : gen_clock_gate
-      cv32e40px_clock_gate clock_gate_i (
-          .clk_i       (clk_int),
-          .en_i        (waddr_onehot_a[x] | waddr_onehot_b[x]),
-          .scan_cg_en_i(scan_cg_en_i),
-          .clk_o       (mem_clocks[x])
-      );
+    end else begin : gen_no_corev_x_if
+      if (X_DUALREAD) begin : gen_no_corev_x_if_dualread
+        always_comb begin
+          rdata_a_o[0] = read_data(raddr_a_wid_i, raddr_a_i);
+          rdata_b_o[0] = read_data(raddr_b_wid_i, raddr_b_i);
+          rdata_c_o[0] = read_data(raddr_c_wid_i, raddr_c_i);
+          rdata_a_o[1] = read_data(raddr_a_wid_i, dualread_addr(raddr_a_i));
+          rdata_b_o[1] = read_data(raddr_b_wid_i, dualread_addr(raddr_b_i));
+          rdata_c_o[1] = read_data(raddr_c_wid_i, dualread_addr(raddr_c_i));
+        end
+      end else begin : gen_no_corev_x_if_no_dualread
+        assign rdata_a_o[0] = read_data(raddr_a_wid_i, raddr_a_i);
+        assign rdata_b_o[0] = read_data(raddr_b_wid_i, raddr_b_i);
+        assign rdata_c_o[0] = read_data(raddr_c_wid_i, raddr_c_i);
+      end
     end
   endgenerate
 
   //-----------------------------------------------------------------------------
   //-- WRITE : Write operation
   //-----------------------------------------------------------------------------
-  //-- Generate M = WORDS sequential processes, each of which describes one
-  //-- word of the memory. The processes are synchronized with the clocks
-  //-- ClocksxC(i), i = 0, 1, ..., M-1
-  //-- Use active low, i.e. transparent on low latches as storage elements
-  //-- Data is sampled on rising clock edge
+  genvar warp_idx, reg_idx;
+  generate
+    for (warp_idx = 0; warp_idx < NUM_WARPS; warp_idx++) begin : gen_warps
+      // R0 per warp is always zero
+      always_ff @(posedge clk or negedge rst_n) begin
+        if (~rst_n) begin
+          mem[warp_idx][0] <= '0;
+        end else begin
+          mem[warp_idx][0] <= '0;
+        end
+      end
 
-  // Integer registers
-  always_latch begin : latch_wdata
-    // Note: The assignment has to be done inside this process or Modelsim complains about it
-    mem[0] = '0;
-
-    for (k = 1; k < NUM_WORDS; k++) begin : w_WordIter
-      if (~rst_n) mem[k] <= '0;
-      else if (mem_clocks[k] == 1'b1) mem[k] <= waddr_onehot_b_q[k] ? wdata_b_q : wdata_a_q;
-    end
-  end
-
-  if (FPU == 1 && ZFINX == 0) begin
-    // Floating point registers
-    always_latch begin : latch_wdata_fp
-      if (FPU == 1) begin
-        for (l = 0; l < NUM_FP_WORDS; l++) begin : w_WordIter
-          if (~rst_n) mem_fp[l] <= '0;
-          else if (mem_clocks[l+NUM_WORDS] == 1'b1)
-            mem_fp[l] <= waddr_onehot_b_q[l+NUM_WORDS] ? wdata_b_q : wdata_a_q;
+      for (reg_idx = 1; reg_idx < NUM_WORDS; reg_idx++) begin : gen_rf
+        always_ff @(posedge clk or negedge rst_n) begin
+          if (~rst_n) begin
+            mem[warp_idx][reg_idx] <= '0;
+          end else begin
+            if (we_b_i && (waddr_b_wid_i == WID_WIDTH'(warp_idx)) && (waddr_b_i[5] == 1'b0) &&
+                (waddr_b_i[4:0] == 5'(reg_idx))) begin
+              mem[warp_idx][reg_idx] <= wdata_b_i;
+            end else if (we_a_i && (waddr_a_wid_i == WID_WIDTH'(warp_idx)) && (waddr_a_i[5] == 1'b0) &&
+                         (waddr_a_i[4:0] == 5'(reg_idx))) begin
+              mem[warp_idx][reg_idx] <= wdata_a_i;
+            end
+          end
         end
       end
     end
-  end
+
+    if (FPU == 1 && ZFINX == 0) begin : gen_mem_fp_write
+      genvar fp_warp, fp_idx;
+      for (fp_warp = 0; fp_warp < NUM_WARPS; fp_warp++) begin : gen_fp_warp
+        for (fp_idx = 0; fp_idx < NUM_FP_WORDS; fp_idx++) begin : fp_regs
+          always_ff @(posedge clk or negedge rst_n) begin
+            if (~rst_n) begin
+              mem_fp[fp_warp][fp_idx] <= '0;
+            end else begin
+              if (we_b_i && (waddr_b_wid_i == WID_WIDTH'(fp_warp)) && (waddr_b_i[5] == 1'b1) &&
+                  (waddr_b_i[4:0] == 5'(fp_idx))) begin
+                mem_fp[fp_warp][fp_idx] <= wdata_b_i;
+              end else if (we_a_i && (waddr_a_wid_i == WID_WIDTH'(fp_warp)) && (waddr_a_i[5] == 1'b1) &&
+                           (waddr_a_i[4:0] == 5'(fp_idx))) begin
+                mem_fp[fp_warp][fp_idx] <= wdata_a_i;
+              end
+            end
+          end
+        end
+      end
+    end else begin : gen_no_mem_fp_write
+      genvar fp_warp_zero, fp_idx_zero;
+      for (fp_warp_zero = 0; fp_warp_zero < NUM_WARPS; fp_warp_zero++) begin : gen_fp_zero
+        for (fp_idx_zero = 0; fp_idx_zero < NUM_FP_WORDS; fp_idx_zero++) begin : gen_fp_zero_idx
+          assign mem_fp[fp_warp_zero][fp_idx_zero] = '0;
+        end
+      end
+    end
+  endgenerate
+
 endmodule

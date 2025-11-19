@@ -49,7 +49,9 @@ module cv32e40px_id_stage
     parameter APU_WOP_CPU = 6,
     parameter APU_NDSFLAGS_CPU = 15,
     parameter APU_NUSFLAGS_CPU = 5,
-    parameter DEBUG_TRIGGER_EN = 1
+    parameter DEBUG_TRIGGER_EN = 1,
+    parameter int unsigned NUM_WARPS = 1,
+    parameter int unsigned WID_WIDTH = (NUM_WARPS <= 1) ? 1 : $clog2(NUM_WARPS)
 ) (
     input logic clk,  // Gated clock
     input logic clk_ungated_i,  // Ungated clock
@@ -85,6 +87,7 @@ module cv32e40px_id_stage
     input logic is_fetch_failed_i,
 
     input logic [31:0] pc_id_i,
+    input logic [WID_WIDTH-1:0] wid_i,
 
     // Stalls
     output logic halt_if_o,  // controller requests a halt of the IF stage
@@ -215,6 +218,11 @@ module cv32e40px_id_stage
     output logic [N_HWLP-1:0][31:0] hwlp_cnt_o,
     output logic                    hwlp_jump_o,
     output logic [      31:0]       hwlp_target_o,
+    output logic                    simt_valid_ex_o,
+    output simt_opcode_e            simt_op_ex_o,
+    output logic [31:0]             simt_rs1_ex_o,
+    output logic [31:0]             simt_rs2_ex_o,
+    output logic [WID_WIDTH-1:0]    wid_ex_o,
 
     // Interface to load store unit
     output logic       data_req_ex_o,
@@ -263,11 +271,13 @@ module cv32e40px_id_stage
 
     // Forward Signals
     input logic [5:0] regfile_waddr_wb_i,
+    input logic [WID_WIDTH-1:0] regfile_waddr_wb_wid_i,
     input logic regfile_we_wb_i,
     input logic regfile_we_wb_power_i,
     input  logic [31:0] regfile_wdata_wb_i, // From wb_stage: selects data from data memory, ex_stage result and sp rdata
 
     input logic [ 5:0] regfile_alu_waddr_fw_i,
+    input logic [WID_WIDTH-1:0] regfile_alu_waddr_fw_wid_i,
     input logic        regfile_alu_we_fw_i,
     input logic        regfile_alu_we_fw_power_i,
     input logic [31:0] regfile_alu_wdata_fw_i,
@@ -339,6 +349,7 @@ module cv32e40px_id_stage
   logic        load_stall;
   logic        csr_apu_stall;
   logic        hwlp_mask;
+  logic [WID_WIDTH-1:0] hwlp_dec_wid;
   logic        halt_id;
   logic        halt_if;
 
@@ -476,6 +487,12 @@ module cv32e40px_id_stage
   logic        [      31:0] hwlp_cnt;
   logic        [N_HWLP-1:0] hwlp_dec_cnt;
   logic                     hwlp_valid;
+  logic                     simt_valid;
+  simt_opcode_e             simt_op;
+  logic [31:0]              simt_rs1_ex_q, simt_rs2_ex_q;
+  simt_opcode_e             simt_op_ex_q;
+  logic                     simt_valid_ex_q;
+  logic [WID_WIDTH-1:0]     wid_ex_q;
 
   // CSR control
   logic                     csr_access;
@@ -604,12 +621,18 @@ module cv32e40px_id_stage
   assign reg_d_ex_is_reg_a_id  = (regfile_waddr_ex_o     == regfile_addr_ra_id) && (rega_used == 1'b1) && (regfile_addr_ra_id != '0);
   assign reg_d_ex_is_reg_b_id  = (regfile_waddr_ex_o     == regfile_addr_rb_id) && (regb_used == 1'b1) && (regfile_addr_rb_id != '0);
   assign reg_d_ex_is_reg_c_id  = (regfile_waddr_ex_o     == regfile_addr_rc_id) && (regc_used == 1'b1) && (regfile_addr_rc_id != '0);
-  assign reg_d_wb_is_reg_a_id  = (regfile_waddr_wb_i     == regfile_addr_ra_id) && (rega_used == 1'b1) && (regfile_addr_ra_id != '0);
-  assign reg_d_wb_is_reg_b_id  = (regfile_waddr_wb_i     == regfile_addr_rb_id) && (regb_used == 1'b1) && (regfile_addr_rb_id != '0);
-  assign reg_d_wb_is_reg_c_id  = (regfile_waddr_wb_i     == regfile_addr_rc_id) && (regc_used == 1'b1) && (regfile_addr_rc_id != '0);
-  assign reg_d_alu_is_reg_a_id = (regfile_alu_waddr_fw_i == regfile_addr_ra_id) && (rega_used == 1'b1) && (regfile_addr_ra_id != '0);
-  assign reg_d_alu_is_reg_b_id = (regfile_alu_waddr_fw_i == regfile_addr_rb_id) && (regb_used == 1'b1) && (regfile_addr_rb_id != '0);
-  assign reg_d_alu_is_reg_c_id = (regfile_alu_waddr_fw_i == regfile_addr_rc_id) && (regc_used == 1'b1) && (regfile_addr_rc_id != '0);
+  assign reg_d_wb_is_reg_a_id  = (regfile_waddr_wb_i     == regfile_addr_ra_id) && (rega_used == 1'b1) &&
+                                 (regfile_addr_ra_id != '0) && (regfile_waddr_wb_wid_i == wid_i);
+  assign reg_d_wb_is_reg_b_id  = (regfile_waddr_wb_i     == regfile_addr_rb_id) && (regb_used == 1'b1) &&
+                                 (regfile_addr_rb_id != '0) && (regfile_waddr_wb_wid_i == wid_i);
+  assign reg_d_wb_is_reg_c_id  = (regfile_waddr_wb_i     == regfile_addr_rc_id) && (regc_used == 1'b1) &&
+                                 (regfile_addr_rc_id != '0) && (regfile_waddr_wb_wid_i == wid_i);
+  assign reg_d_alu_is_reg_a_id = (regfile_alu_waddr_fw_i == regfile_addr_ra_id) && (rega_used == 1'b1) &&
+                                 (regfile_addr_ra_id != '0) && (regfile_alu_waddr_fw_wid_i == wid_i);
+  assign reg_d_alu_is_reg_b_id = (regfile_alu_waddr_fw_i == regfile_addr_rb_id) && (regb_used == 1'b1) &&
+                                 (regfile_addr_rb_id != '0) && (regfile_alu_waddr_fw_wid_i == wid_i);
+  assign reg_d_alu_is_reg_c_id = (regfile_alu_waddr_fw_i == regfile_addr_rc_id) && (regc_used == 1'b1) &&
+                                 (regfile_addr_rc_id != '0) && (regfile_alu_waddr_fw_wid_i == wid_i);
 
 
   // kill instruction in the IF/ID stage by setting the instr_valid_id control
@@ -1033,7 +1056,9 @@ module cv32e40px_id_stage
       .FPU       (FPU),
       .ZFINX     (ZFINX),
       .COREV_X_IF(COREV_X_IF),
-      .X_DUALREAD(X_DUALREAD)
+      .X_DUALREAD(X_DUALREAD),
+      .NUM_WARPS (NUM_WARPS),
+      .WID_WIDTH (WID_WIDTH)
   ) register_file_i (
       .clk  (clk),
       .rst_n(rst_n),
@@ -1043,26 +1068,31 @@ module cv32e40px_id_stage
       .dualread_i(x_issue_resp_i.dualread),
 
       // Read port a
-      .raddr_a_i(regfile_addr_ra_id),
-      .rdata_a_o(regfile_data_ra_id),
+      .raddr_a_i    (regfile_addr_ra_id),
+      .raddr_a_wid_i(wid_i),
+      .rdata_a_o    (regfile_data_ra_id),
 
       // Read port b
-      .raddr_b_i(regfile_addr_rb_id),
-      .rdata_b_o(regfile_data_rb_id),
+      .raddr_b_i    (regfile_addr_rb_id),
+      .raddr_b_wid_i(wid_i),
+      .rdata_b_o    (regfile_data_rb_id),
 
       // Read port c
-      .raddr_c_i(regfile_addr_rc_id),
-      .rdata_c_o(regfile_data_rc_id),
+      .raddr_c_i    (regfile_addr_rc_id),
+      .raddr_c_wid_i(wid_i),
+      .rdata_c_o    (regfile_data_rc_id),
 
       // Write port a
-      .waddr_a_i(regfile_waddr_wb_i),
-      .wdata_a_i(regfile_wdata_wb_i),
-      .we_a_i   (regfile_we_wb_power_i),
+      .waddr_a_i    (regfile_waddr_wb_i),
+      .waddr_a_wid_i(regfile_waddr_wb_wid_i),
+      .wdata_a_i    (regfile_wdata_wb_i),
+      .we_a_i       (regfile_we_wb_power_i),
 
       // Write port b
-      .waddr_b_i(regfile_alu_waddr_fw_i),
-      .wdata_b_i(regfile_alu_wdata_fw_i),
-      .we_b_i   (regfile_alu_we_fw_power_i)
+      .waddr_b_i    (regfile_alu_waddr_fw_i),
+      .waddr_b_wid_i(regfile_alu_waddr_fw_wid_i),
+      .wdata_b_i    (regfile_alu_wdata_fw_i),
+      .we_b_i       (regfile_alu_we_fw_power_i)
   );
 
   logic [1:0] x_mem_data_type_id;
@@ -1302,6 +1332,8 @@ module cv32e40px_id_stage
       .regc_mux_o            (regc_mux),
       .is_clpx_o             (is_clpx),
       .is_subrot_o           (is_subrot),
+      .simt_valid_o          (simt_valid),
+      .simt_op_o             (simt_op),
 
       // MUL signals
       .mult_operator_o   (mult_operator),
@@ -1379,7 +1411,8 @@ module cv32e40px_id_stage
   cv32e40px_controller #(
       .COREV_CLUSTER(COREV_CLUSTER),
       .COREV_PULP   (COREV_PULP),
-      .FPU          (FPU)
+      .FPU          (FPU),
+      .NUM_WARPS    (NUM_WARPS)
   ) controller_i (
       .clk          (clk),  // Gated clock
       .clk_ungated_i(clk_ungated_i),  // Ungated clock
@@ -1414,6 +1447,7 @@ module cv32e40px_id_stage
 
       // from IF/ID pipeline
       .instr_valid_i(instr_valid_i),
+      .wid_id_i     (wid_i),
 
       // from prefetcher
       .instr_req_o(instr_req_o),
@@ -1432,6 +1466,7 @@ module cv32e40px_id_stage
       .hwlp_end_addr_i  (hwlp_end_o),
       .hwlp_counter_i   (hwlp_cnt_o),
       .hwlp_dec_cnt_o   (hwlp_dec_cnt),
+      .hwlp_dec_wid_o   (hwlp_dec_wid),
 
       .hwlp_jump_o     (hwlp_jump_o),
       .hwlp_targ_addr_o(hwlp_target_o),
@@ -1598,7 +1633,9 @@ module cv32e40px_id_stage
 
 
       cv32e40px_hwloop_regs #(
-          .N_REGS(N_HWLP)
+          .N_REGS    (N_HWLP),
+          .NUM_WARPS (NUM_WARPS),
+          .WID_WIDTH (WID_WIDTH)
       ) hwloop_regs_i (
           .clk  (clk),
           .rst_n(rst_n),
@@ -1609,6 +1646,7 @@ module cv32e40px_id_stage
           .hwlp_cnt_data_i  (hwlp_cnt),
           .hwlp_we_i        (hwlp_we_masked),
           .hwlp_regid_i     (hwlp_regid),
+          .wid_i            (wid_i),
 
           // from controller
           .valid_i(hwlp_valid),
@@ -1619,7 +1657,8 @@ module cv32e40px_id_stage
           .hwlp_counter_o   (hwlp_cnt_o),
 
           // from hwloop controller
-          .hwlp_dec_cnt_i(hwlp_dec_cnt)
+          .hwlp_dec_cnt_i(hwlp_dec_cnt),
+          .hwlp_dec_wid_i(hwlp_dec_wid)
       );
 
       assign hwlp_valid = instr_valid_i & clear_instr_valid_o;
@@ -1755,6 +1794,11 @@ module cv32e40px_id_stage
       data_misaligned_ex_o   <= 1'b0;
 
       pc_ex_o                <= '0;
+      simt_valid_ex_o        <= 1'b0;
+      simt_op_ex_o           <= SIMT_OP_NONE;
+      simt_rs1_ex_o          <= '0;
+      simt_rs2_ex_o          <= '0;
+      wid_ex_o               <= '0;
 
       branch_in_ex_o         <= 1'b0;
 
@@ -1866,6 +1910,11 @@ module cv32e40px_id_stage
         if ((ctrl_transfer_insn_in_id == BRANCH_COND) || data_req_id) begin
           pc_ex_o <= pc_id_i;
         end
+        simt_valid_ex_o <= simt_valid;
+        simt_op_ex_o    <= simt_op;
+        simt_rs1_ex_o   <= operand_a_fw_id;
+        simt_rs2_ex_o   <= operand_b_fw_id;
+        wid_ex_o        <= wid_i;
 
         branch_in_ex_o <= ctrl_transfer_insn_in_id == BRANCH_COND;
       end else if (ex_ready_i) begin
@@ -1879,6 +1928,8 @@ module cv32e40px_id_stage
         csr_op_ex_o          <= CSR_OP_READ;
 
         data_misaligned_ex_o <= 1'b0;
+        simt_valid_ex_o      <= 1'b0;
+        simt_op_ex_o         <= SIMT_OP_NONE;
 
         branch_in_ex_o       <= 1'b0;
 

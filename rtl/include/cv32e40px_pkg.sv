@@ -60,6 +60,15 @@ package cv32e40px_pkg;
   parameter OPCODE_CUSTOM_2 = 7'h5b;
   parameter OPCODE_CUSTOM_3 = 7'h7b;
 
+  typedef enum logic [1:0] {
+    SIMT_OP_NONE   = 2'b00,
+    SIMT_OP_WSPAWN = 2'b01,
+    SIMT_OP_EXIT   = 2'b10
+  } simt_opcode_e;
+
+  parameter [6:0] SIMT_FUNCT7_WSPAWN = 7'b0000001;
+  parameter [6:0] SIMT_FUNCT7_EXIT   = 7'b0000010;
+
   parameter REGC_S1 = 2'b10;
   parameter REGC_S4 = 2'b00;
   parameter REGC_RD = 2'b01;

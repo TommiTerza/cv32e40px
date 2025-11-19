@@ -216,7 +216,8 @@ custom/hello_world.elf: custom/hello_world.c
 		-L $(RISCV)/riscv32-unknown-elf/lib \
 		-lc -lm -lgcc
 custom-clean:
-	rm -rf custom/hello_world.elf custom/hello_world.hex
+	rm -rf custom/hello_world.elf custom/hello_world.hex \
+		custom/simt_vector_add.elf custom/simt_vector_add.hex
 
 .PHONY: custom-vsim-run
 custom-vsim-run: vsim-all custom/hello_world.hex
@@ -227,6 +228,29 @@ custom-vsim-run: vsim-run
 custom-vsim-run-gui: vsim-all custom/hello_world.hex
 custom-vsim-run-gui: ALL_VSIM_FLAGS += "+firmware=custom/hello_world.hex"
 custom-vsim-run-gui: vsim-run-gui
+
+# SIMT vector addition example using custom warp instructions
+custom/simt_vector_add.elf: custom/simt_vector_add.c
+	$(RISCV_EXE_PREFIX)gcc -march=rv32imc -o $@ -w -Os -g -nostdlib \
+		$(CUSTOM_GCC_FLAGS) \
+		-T custom/link.ld \
+		-static \
+		custom/crt0.S \
+		$^ mem_stall/mem_stall.c custom/syscalls.c custom/vectors.S \
+		-I $(RISCV)/riscv32-unknown-elf/include \
+		-I mem_stall \
+		-L $(RISCV)/riscv32-unknown-elf/lib \
+		-lc -lm -lgcc
+
+.PHONY: vector-add-vsim-run
+vector-add-vsim-run: vsim-all custom/simt_vector_add.hex
+vector-add-vsim-run: ALL_VSIM_FLAGS += "+firmware=custom/simt_vector_add.hex"
+vector-add-vsim-run: vsim-run
+
+.PHONY: vector-add-vsim-run-gui
+vector-add-vsim-run-gui: vsim-all custom/simt_vector_add.hex
+vector-add-vsim-run-gui: ALL_VSIM_FLAGS += "+firmware=custom/simt_vector_add.hex"
+vector-add-vsim-run-gui: vsim-run-gui
 
 # Running custom fp programs:
 # This is an example for running a floating-point matrix multiplication in the testbench

@@ -39,7 +39,8 @@ module cv32e40px_core
     parameter FPU_ADDMUL_LAT = 0,  // Floating-Point ADDition/MULtiplication lane pipeline registers number
     parameter FPU_OTHERS_LAT = 0,  // Floating-Point COMParison/CONVersion lanes pipeline registers number
     parameter ZFINX = 0,  // Float-in-General Purpose registers
-    parameter NUM_MHPMCOUNTERS = 1
+    parameter NUM_MHPMCOUNTERS = 1,
+    parameter int unsigned NUM_WARPS = 1
 ) (
     // Clock and Reset
     input logic clk_i,
@@ -136,6 +137,80 @@ module cv32e40px_core
     output logic core_sleep_o
 );
 
+  localparam int unsigned WID_WIDTH = (NUM_WARPS <= 1) ? 1 : $clog2(NUM_WARPS);
+
+  logic [WID_WIDTH-1:0] warp_id_if;
+  logic [WID_WIDTH-1:0] warp_id_id;
+  logic [NUM_WARPS-1:0] warp_active_mask;
+  logic [NUM_WARPS-1:0] warp_stall_mask;
+  logic                  instr_valid_id;
+  logic                  id_ready;
+  logic                  simt_valid_ex;
+  simt_opcode_e          simt_op_ex;
+  logic [31:0]           simt_rs1_ex, simt_rs2_ex;
+  logic [WID_WIDTH-1:0]  wid_ex;
+  logic                  simt_cmd_valid;
+  simt_opcode_e          simt_cmd_op;
+  logic [WID_WIDTH-1:0]  simt_cmd_wid;
+  logic [NUM_WARPS-1:0]  simt_cmd_mask;
+  logic [31:0]           simt_cmd_pc;
+  // Per-warp PC/state tracking (currently only warp 0 toggles).
+  logic [31:0]          warp_pc_q   [NUM_WARPS];
+  logic [31:0]          warp_pc_d   [NUM_WARPS];
+  typedef enum logic [1:0] {W_STATE_INACTIVE = 2'b00, W_STATE_ACTIVE = 2'b01, W_STATE_DONE = 2'b10} warp_state_e;
+  warp_state_e warp_state_q[NUM_WARPS];
+  warp_state_e warp_state_d[NUM_WARPS];
+  logic [31:0] branch_addr_core;
+
+  always_comb begin
+    for (int unsigned w = 0; w < NUM_WARPS; w++) begin
+      warp_pc_d[w]      = warp_pc_q[w];
+      warp_state_d[w]   = warp_state_q[w];
+      warp_active_mask[w] = (warp_state_q[w] == W_STATE_ACTIVE);
+      warp_stall_mask[w]  = 1'b0;
+    end
+    if (instr_valid_id && id_ready) begin
+      warp_pc_d[warp_id_id] = pc_id + 32'd4;
+    end
+    if (pc_set) begin
+      warp_pc_d[warp_id_id] = branch_addr_core;
+    end
+    // SIMT control operations update per-warp state.
+    if (simt_cmd_valid) begin
+      unique case (simt_cmd_op)
+        SIMT_OP_WSPAWN: begin
+          for (int unsigned w = 0; w < NUM_WARPS; w++) begin
+            if (simt_cmd_mask[w]) begin
+              warp_pc_d[w]    = simt_cmd_pc;
+              warp_state_d[w] = W_STATE_ACTIVE;
+            end
+          end
+        end
+        SIMT_OP_EXIT: begin
+          warp_state_d[simt_cmd_wid] = W_STATE_DONE;
+        end
+        default: ;
+      endcase
+    end
+    // When ID is stalled on a given warp, prevent IF from selecting it again.
+    if (instr_valid_id && !id_ready) begin
+      warp_stall_mask[warp_id_id] = 1'b1;
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      for (int unsigned w = 0; w < NUM_WARPS; w++) begin
+        warp_pc_q[w]    <= boot_addr_i;
+        warp_state_q[w] <= (0 == w) ? W_STATE_ACTIVE : W_STATE_INACTIVE;
+      end
+    end else begin
+      for (int unsigned w = 0; w < NUM_WARPS; w++) begin
+        warp_pc_q[w]    <= warp_pc_d[w];
+        warp_state_q[w] <= warp_state_d[w];
+      end
+    end
+  end
   import cv32e40px_pkg::*;
 
   // Unused parameters and signals (left in code for future design extensions)
@@ -163,7 +238,6 @@ module cv32e40px_core
   localparam APU = (FPU == 1) ? 1 : 0;
 
   // IF/ID signals
-  logic        instr_valid_id;
   logic [31:0] instr_rdata_id;  // Instruction sampled inside IF stage
   logic        is_compressed_id;
   logic        illegal_c_insn_id;
@@ -273,6 +347,7 @@ module cv32e40px_core
   logic        [                 5:0]       regfile_waddr_ex;
   logic                                     regfile_we_ex;
   logic        [                 5:0]       regfile_waddr_fw_wb_o;  // From WB to ID
+  logic        [        WID_WIDTH-1:0]      regfile_waddr_fw_wb_wid;
   logic                                     regfile_we_wb;
   logic                                     regfile_we_wb_power;
   logic        [                31:0]       regfile_wdata;
@@ -281,6 +356,7 @@ module cv32e40px_core
   logic                                     regfile_alu_we_ex;
 
   logic        [                 5:0]       regfile_alu_waddr_fw;
+  logic        [        WID_WIDTH-1:0]      regfile_alu_waddr_fw_wid;
   logic                                     regfile_alu_we_fw;
   logic                                     regfile_alu_we_fw_power;
   logic        [                31:0]       regfile_alu_wdata_fw;
@@ -316,7 +392,6 @@ module cv32e40px_core
 
   // stall control
   logic               halt_if;
-  logic               id_ready;
   logic               ex_ready;
 
   logic               id_valid;
@@ -467,6 +542,8 @@ module cv32e40px_core
   //                                              //
   //////////////////////////////////////////////////
   cv32e40px_if_stage #(
+      .NUM_WARPS (NUM_WARPS),
+      .WID_WIDTH (WID_WIDTH),
       .COREV_X_IF (COREV_X_IF),
       .COREV_PULP (COREV_PULP),
       .PULP_OBI   (PULP_OBI),
@@ -541,6 +618,12 @@ module cv32e40px_core
       // from hwloop registers
       .hwlp_jump_i  (hwlp_jump),
       .hwlp_target_i(hwlp_target),
+      .warp_active_i (warp_active_mask),
+      .warp_stall_i  (warp_stall_mask),
+      .warp_pc_i     (warp_pc_q[warp_id_if]),
+      .branch_addr_o (branch_addr_core),
+      .warp_id_if_o  (warp_id_if),
+      .warp_id_id_o  (warp_id_id),
 
 
       // Jump targets
@@ -581,7 +664,9 @@ module cv32e40px_core
       .APU_WOP_CPU     (APU_WOP_CPU),
       .APU_NDSFLAGS_CPU(APU_NDSFLAGS_CPU),
       .APU_NUSFLAGS_CPU(APU_NUSFLAGS_CPU),
-      .DEBUG_TRIGGER_EN(DEBUG_TRIGGER_EN)
+      .DEBUG_TRIGGER_EN(DEBUG_TRIGGER_EN),
+      .NUM_WARPS      (NUM_WARPS),
+      .WID_WIDTH      (WID_WIDTH)
   ) id_stage_i (
       .clk          (clk),  // Gated clock
       .clk_ungated_i(clk_i),  // Ungated clock
@@ -616,6 +701,7 @@ module cv32e40px_core
       .is_fetch_failed_i(is_fetch_failed_id),
 
       .pc_id_i(pc_id),
+      .wid_i  (warp_id_id),
 
       .is_compressed_i (is_compressed_id),
       .illegal_c_insn_i(illegal_c_insn_id),
@@ -750,6 +836,11 @@ module cv32e40px_core
 
       .hwlp_jump_o  (hwlp_jump),
       .hwlp_target_o(hwlp_target),
+      .simt_valid_ex_o(simt_valid_ex),
+      .simt_op_ex_o   (simt_op_ex),
+      .simt_rs1_ex_o  (simt_rs1_ex),
+      .simt_rs2_ex_o  (simt_rs2_ex),
+      .wid_ex_o       (wid_ex),
 
       // LSU
       .data_req_ex_o       (data_req_ex),  // to load store unit
@@ -796,11 +887,13 @@ module cv32e40px_core
 
       // Forward Signals
       .regfile_waddr_wb_i   (regfile_waddr_fw_wb_o),  // Write address ex-wb pipeline
+      .regfile_waddr_wb_wid_i(regfile_waddr_fw_wb_wid),
       .regfile_we_wb_i      (regfile_we_wb),  // write enable for the register file
       .regfile_we_wb_power_i(regfile_we_wb_power),
       .regfile_wdata_wb_i   (regfile_wdata),  // write data to commit in the register file
 
       .regfile_alu_waddr_fw_i   (regfile_alu_waddr_fw),
+      .regfile_alu_waddr_fw_wid_i(regfile_alu_waddr_fw_wid),
       .regfile_alu_we_fw_i      (regfile_alu_we_fw),
       .regfile_alu_we_fw_power_i(regfile_alu_we_fw_power),
       .regfile_alu_wdata_fw_i   (regfile_alu_wdata_fw),
@@ -951,20 +1044,27 @@ module cv32e40px_core
       .regfile_we_i   (regfile_we_ex),
 
       // Output of ex stage pipeline
-      .regfile_waddr_wb_o   (regfile_waddr_fw_wb_o),
-      .regfile_we_wb_o      (regfile_we_wb),
-      .regfile_we_wb_power_o(regfile_we_wb_power),
-      .regfile_wdata_wb_o   (regfile_wdata),
+      .regfile_waddr_wb_o     (regfile_waddr_fw_wb_o),
+      .regfile_waddr_wb_wid_o (regfile_waddr_fw_wb_wid),
+      .regfile_we_wb_o        (regfile_we_wb),
+      .regfile_we_wb_power_o  (regfile_we_wb_power),
+      .regfile_wdata_wb_o     (regfile_wdata),
 
       // To IF: Jump and branch target and decision
       .jump_target_o    (jump_target_ex),
       .branch_decision_o(branch_decision),
+      .simt_cmd_valid_o(simt_cmd_valid),
+      .simt_cmd_op_o   (simt_cmd_op),
+      .simt_cmd_wid_o  (simt_cmd_wid),
+      .simt_cmd_mask_o (simt_cmd_mask),
+      .simt_cmd_pc_o   (simt_cmd_pc),
 
       // To ID stage: Forwarding signals
-      .regfile_alu_waddr_fw_o   (regfile_alu_waddr_fw),
-      .regfile_alu_we_fw_o      (regfile_alu_we_fw),
-      .regfile_alu_we_fw_power_o(regfile_alu_we_fw_power),
-      .regfile_alu_wdata_fw_o   (regfile_alu_wdata_fw),
+      .regfile_alu_waddr_fw_o     (regfile_alu_waddr_fw),
+      .regfile_alu_waddr_fw_wid_o (regfile_alu_waddr_fw_wid),
+      .regfile_alu_we_fw_o        (regfile_alu_we_fw),
+      .regfile_alu_we_fw_power_o  (regfile_alu_we_fw_power),
+      .regfile_alu_wdata_fw_o     (regfile_alu_wdata_fw),
 
       // stall control
       .is_decoding_i (is_decoding),
