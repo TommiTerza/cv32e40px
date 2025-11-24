@@ -1,0 +1,39 @@
+#-----------------------------------------------------------
+# Vivado v2024.2 (64-bit)
+# SW Build 5239630 on Fri Nov 08 22:34:34 MST 2024
+# IP Build 5239520 on Sun Nov 10 16:12:51 MST 2024
+# SharedData Build 5239561 on Fri Nov 08 14:39:27 MST 2024
+# Start of session at: Thu Nov 20 08:35:32 2025
+# Process ID         : 813798
+# Current directory  : /home/tommaso/git/xsimt/cv32e40px
+# Command line       : vivado $
+# Log file           : /home/tommaso/git/xsimt/cv32e40px/vivado.log
+# Journal file       : /home/tommaso/git/xsimt/cv32e40px/vivado.jou
+# Running On         : tommaso-Dell-Pro-14-Plus-PB14250
+# Platform           : Ubuntu
+# Operating System   : Ubuntu 24.04.3 LTS
+# Processor Detail   : Intel(R) Core(TM) Ultra 7 265U
+# CPU Frequency      : 3794.224 MHz
+# CPU Physical cores : 12
+# CPU Logical cores  : 14
+# Host memory        : 33077 MB
+# Swap memory        : 8589 MB
+# Total Virtual      : 41667 MB
+# Available Virtual  : 29302 MB
+#-----------------------------------------------------------
+start_gui
+open_project /home/tommaso/git/egpu-xheep/build/eslepfl_systems_egpu_xheep_0/zcu104-vivado/eslepfl_systems_egpu_xheep_0.xpr
+open_hw_manager
+connect_hw_server -allow_non_jtag
+open_hw_target
+set_property PROGRAM.FILE {/home/tommaso/git/egpu-xheep/build/eslepfl_systems_egpu_xheep_0/zcu104-vivado/eslepfl_systems_egpu_xheep_0.runs/impl_1/xilinx_egpu_xheep_wrapper.bit} [get_hw_devices xczu7_0]
+current_hw_device [get_hw_devices xczu7_0]
+refresh_hw_device -update_hw_probes false [lindex [get_hw_devices xczu7_0] 0]
+current_hw_device [get_hw_devices arm_dap_1]
+refresh_hw_device -update_hw_probes false [lindex [get_hw_devices arm_dap_1] 0]
+current_hw_device [get_hw_devices xczu7_0]
+set_property PROBES.FILE {} [get_hw_devices xczu7_0]
+set_property FULL_PROBES.FILE {} [get_hw_devices xczu7_0]
+set_property PROGRAM.FILE {/home/tommaso/git/egpu-xheep/build/eslepfl_systems_egpu_xheep_0/zcu104-vivado/eslepfl_systems_egpu_xheep_0.bit} [get_hw_devices xczu7_0]
+program_hw_devices [get_hw_devices xczu7_0]
+refresh_hw_device [lindex [get_hw_devices xczu7_0] 0]

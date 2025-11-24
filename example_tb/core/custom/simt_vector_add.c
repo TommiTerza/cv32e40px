@@ -26,7 +26,9 @@ static volatile int32_t vec_c[VECTOR_LENGTH];
 static volatile uint32_t warp_claim = 0;
 static volatile uint32_t warp_done = 0;
 
-static void vector_add_kernel(void);
+static void kernel(void);
+static void kernel_wrapper(void);
+static void spawn_warps(void);
 
 static inline void simt_wspawn(uint32_t warp_mask, void (*entry)(void)) {
     asm volatile(".insn r %3, %4, %2, x0, %0, %1"
@@ -59,16 +61,29 @@ int main(void) {
     warp_claim = 0;
     warp_done = 0;
 
-    /* Spawn four warps onto the vector addition kernel. */
-    simt_wspawn((1u << NUM_WARPS) - 1u, vector_add_kernel);
+    /* Spawn worker warps (1..NUM_WARPS-1) onto the kernel wrapper. */
+    spawn_warps();
 
-    /* The program never returns: all warps exit via the kernel. */
-    while (1) {
-        __asm__ volatile("wfi");
-    }
+    /* Host warp (0) runs the kernel locally, then returns. */
+    kernel();
+
+    return EXIT_SUCCESS;
 }
 
-static void vector_add_kernel(void) {
+static void spawn_warps(void) {
+    /* Mask excludes warp 0 so it stays in main. */
+    uint32_t worker_mask = ((1u << NUM_WARPS) - 1u) & ~1u;
+    simt_wspawn(worker_mask, kernel_wrapper);
+}
+
+/* SIMT wrapper: run the kernel then exit the warp. */
+static void kernel_wrapper(void) {
+    kernel();
+    simt_exit();
+}
+
+/* Core computation: SIMT-free vector addition + completion accounting. */
+static void kernel(void) {
     uint32_t warp_local_id = __sync_fetch_and_add(&warp_claim, 1);
     uint32_t start = warp_local_id * CHUNK_SIZE;
     uint32_t end = start + CHUNK_SIZE;
@@ -94,6 +109,4 @@ static void vector_add_kernel(void) {
             printf("SIMT vector add failed: %d mismatches\n", errors);
         }
     }
-
-    simt_exit();
 }
