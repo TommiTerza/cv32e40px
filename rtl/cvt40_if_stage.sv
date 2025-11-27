@@ -155,10 +155,8 @@ module cvt40_if_stage #(
 
   // Indicates when an instruction is handed to ID.
   logic instr_issue;
-  logic hold_warp;
 
   assign instr_issue = if_valid && instr_valid && warp_sched_valid;
-  assign hold_warp   = instr_valid_id_o && !id_ready_i;
 
   // Round-robin scheduler chooses which warp feeds IF and tracks per-warp PC/state.
   cvt40_warp_scheduler #(
@@ -167,24 +165,13 @@ module cvt40_if_stage #(
   ) warp_scheduler_i (
       .clk            (clk),
       .rst_n          (rst_n),
-      .sched_enable_i (req_i),
-      .instr_issue_i  (instr_issue),
-      .instr_pc_i     (pc_if_o),
-      .instr_warp_i   (warp_sched_id),
-      .branch_set_i   (pc_set_i),
-      .branch_warp_i  (warp_id_id_o),
-      .branch_target_i(branch_addr_n),
-      .hold_warp_i    (hold_warp),
-      .hold_warp_id_i (warp_id_id_o),
+      .sched_enable_i (instr_issue),
       .simt_cmd_valid_i(simt_cmd_valid_i),
       .simt_cmd_op_i   (simt_cmd_op_i),
       .simt_cmd_wid_i  (simt_cmd_wid_i),
       .simt_cmd_mask_i (simt_cmd_mask_i),
-      .simt_cmd_pc_i   (simt_cmd_pc_i),
-      .boot_addr_i     (boot_addr_i),
       .warp_valid_o    (warp_sched_valid),
-      .warp_id_o       (warp_sched_id),
-      .warp_pc_o       (warp_pc_cur)
+      .warp_id_o       (warp_sched_id)
   );
 
   assign warp_id_if_o = warp_sched_valid ? warp_sched_id : '0;
@@ -215,8 +202,8 @@ module cvt40_if_stage #(
 
   // fetch address selection
   always_comb begin
-    // Default to the scheduler-provided warp PC (per-warp tracking)
-    branch_addr_n = {warp_pc_cur[31:2], 2'b0};
+    // Default to the aligner-tracked PC for the current warp
+    branch_addr_n = {pc_if_o[31:2], 2'b0};
 
     unique case (pc_mux_i)
       PC_BOOT: branch_addr_n = {boot_addr_i[31:2], 2'b0};
@@ -322,12 +309,19 @@ module cvt40_if_stage #(
   assign if_ready = fetch_valid & id_ready_i;
   assign if_valid = (~halt_if_i) & if_ready;
 
-  cvt40_aligner aligner_i (
+  cvt40_aligner # (
+      .NUM_WARPS (NUM_WARPS)
+  ) aligner_i (
       .clk             (clk),
       .rst_n           (rst_n),
       .fetch_valid_i   (fetch_valid),
       .aligner_ready_o (aligner_ready),
       .if_valid_i      (if_valid),
+      .warp_id_i       (warp_sched_id),
+      .simt_cmd_op_i   (simt_cmd_op_i),
+      .simt_cmd_pc_i   (simt_cmd_pc_i),
+      .simt_cmd_mask_i (simt_cmd_mask_i),
+      .simt_cmd_valid_i(simt_cmd_valid_i),
       .fetch_rdata_i   (fetch_rdata),
       .instr_aligned_o (instr_aligned),
       .instr_valid_o   (instr_valid),
